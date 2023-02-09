@@ -1,6 +1,6 @@
 # gitrows-go
 
-Git as Key-Value store. Use this project as Golang library, see [Installation](#Installation).
+Git as Key-Value store. Use this project as Golang library, see [Installation](#Installation). 
 
 
 > WARNING!
@@ -55,6 +55,59 @@ go get -u github.com/yusufsyaifudin/gitrows-go
 Use import path: `github.com/yusufsyaifudin/gitrows`
 
 
+### Example
+
+Here's the basic example where can Upsert and Get the content with key `note.md`.
+
+```go
+package main
+
+import (
+   "fmt"
+   "log"
+   "context"
+   "encoding/base64"
+   
+   "github.com/yusufsyaifudin/gitrows"
+)
+
+func main() {
+   const PRIVATE_KEY_B64 = ""
+   privateKey, err := base64.StdEncoding.DecodeString(PRIVATE_KEY_B64)
+   checkError(err)
+
+   db, err := gitrows.New(
+      gitrows.WithGitSshUrl("git@github.com:yusufsyaifudin/gitrows-test-repo.git"),
+      gitrows.WithPrivateKey(privateKey, ""),
+      gitrows.WithBranch("gitrows"),
+   )
+   checkError(err)
+
+   ctx := context.TODO()
+   path := "note.md"
+
+   hash, changed, err := db.Upsert(ctx, path, []byte("rewrite all"),
+      gitrows.UpsertCommitMsg("my update"),
+      gitrows.UpsertAllowEmptyCommit(false),
+   )
+   checkError(err)
+   
+   fmt.Printf("Upsert is success=%T with commit hash=%q\n", changed, hash)
+   
+
+   dataGet, err := db.Get(ctx, path)
+   checkError(err)
+   fmt.Printf("The value of key=%q:\n%s\n", path, dataGet)
+}
+
+func checkError(err error) {
+   if err != nil {
+      log.Fatal(err)
+   }
+}
+
+```
+
 ## What processes behind this?
 
 When you `Get`, `Create`, `Upsert`, and `Delete` the `key`, we will try to:
@@ -85,5 +138,3 @@ When you `Get`, `Create`, `Upsert`, and `Delete` the `key`, we will try to:
 Some example use-case that you can do with this library are:
 
 * Fetch in cronjob to see changes on specific files in Git. (Similar like what ArgoCD do when listening directory changes https://github.com/argoproj/argo-cd/tree/v2.6.1/util/git)
-
-
