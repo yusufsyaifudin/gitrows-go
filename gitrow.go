@@ -2,6 +2,7 @@ package gitrows
 
 import (
 	"context"
+	"io"
 	"strings"
 )
 
@@ -10,6 +11,17 @@ type DB interface {
 	Create(ctx context.Context, key string, data []byte, opts ...CreateOpt) (commitHashString string, err error)
 	Upsert(ctx context.Context, key string, data []byte, opts ...UpsertOpt) (commitHashString string, changed bool, err error)
 	Delete(ctx context.Context, key string, opts ...DeleteOpt) (commitHashString string, err error)
+	List(ctx context.Context, opts ...ListOpt) (entries Entries, err error)
+}
+
+type Entries interface {
+	KVs() []KV
+}
+
+type KV interface {
+	Key() string
+	Value() (io.ReadCloser, error)
+	LastCommit() string
 }
 
 type CreateOpt func(*CreateConfig) error
@@ -73,6 +85,20 @@ func DeleteCommitMsg(msg string) DeleteOpt {
 		}
 
 		config.commitMsg = msg
+		return nil
+	}
+}
+
+type ListOpt func(*ListConfig) error
+
+type ListConfig struct {
+	prefix string
+}
+
+func ListPrefix(prefix string) ListOpt {
+	return func(config *ListConfig) error {
+		prefix = strings.TrimSpace(prefix)
+		config.prefix = prefix
 		return nil
 	}
 }

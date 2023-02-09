@@ -9,9 +9,11 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/yusufsyaifudin/gitrows/pkg/giturl"
+	"io"
 	"net/url"
 	"os"
 	"path"
@@ -518,7 +520,7 @@ func (db *DBImpl) Create(ctx context.Context, key string, data []byte, opts ...C
 	}
 
 	var commitHash plumbing.Hash
-	commitMsg := fmt.Sprintf("gitrows: CREATE")
+	commitMsg := cfg.commitMsg
 	commitHash, err = worktree.Commit(commitMsg, &git.CommitOptions{
 		All:               true,
 		AllowEmptyCommits: false,
@@ -594,6 +596,7 @@ func (db *DBImpl) Upsert(ctx context.Context, key string, data []byte, opts ...U
 			return
 		}
 
+		// TODO: must return last commit Hash when this file is changed
 		commitHashString = head.Hash().String()
 		return
 	}
@@ -609,6 +612,7 @@ func (db *DBImpl) Upsert(ctx context.Context, key string, data []byte, opts ...U
 		return
 	}
 
+	// using current commit as return
 	commitHashString = commitHash.String()
 
 	refSpec := fmt.Sprintf("%s:%s", plumbing.NewBranchReferenceName(db.gitBranch), plumbing.NewBranchReferenceName(db.gitBranch))
@@ -702,5 +706,151 @@ func (db *DBImpl) Delete(ctx context.Context, key string, opts ...DeleteOpt) (co
 		return
 	}
 
+	return
+}
+
+type kvIter struct {
+	k          string
+	v          func() (io.ReadCloser, error)
+	lastCommit *object.Commit
+}
+
+func (k *kvIter) Key() string {
+	return k.k
+}
+
+func (k *kvIter) Value() (io.ReadCloser, error) {
+	return k.v()
+}
+
+func (k *kvIter) LastCommit() string {
+	if k.lastCommit == nil {
+		return ""
+	}
+	return k.lastCommit.Hash.String()
+}
+
+var _ KV = (*kvIter)(nil)
+
+type entriesImpl struct {
+	kvs []KV
+}
+
+var _ Entries = (*entriesImpl)(nil)
+
+func (e *entriesImpl) KVs() []KV {
+	return e.kvs
+}
+
+// List fetch all files in current git repository.
+// This is similar like command: git ls-tree <branch-name> --name-only
+//
+// Please note, that since we only `git fetch` with depth 1, then the LastCommit may return only the last commit
+// that exist in the local repository.
+// If you want to ensure that the LastCommit() return the last commit hash when the file is modified,
+// then you MUST `git fetch` or `git pull` all Git history.
+// This because, when you have 1000 commits, but 1 file is never changed after first commit,
+// then in order to track the "first commit" we need all parent commit history
+// which only be available when we `git fetch` all history.
+func (db *DBImpl) List(ctx context.Context, opts ...ListOpt) (entries Entries, err error) {
+	cfg := &ListConfig{}
+
+	for _, opt := range opts {
+		err = opt(cfg)
+		if err != nil {
+			err = fmt.Errorf("list command: %w", err)
+			return
+		}
+	}
+
+	err = db.forcePull(ctx)
+	if err != nil {
+		err = fmt.Errorf("list command: %w", err)
+		return
+	}
+
+	// get reference of branch
+	branchName := plumbing.NewBranchReferenceName(db.gitBranch)
+	ref, err := db.gitRepo.Reference(branchName, false)
+	if err != nil {
+		err = fmt.Errorf("list command: retrieving ref for branch %s error: %w", branchName, err)
+		return
+	}
+
+	// get all files of current branch, this similar like git ls-tree -r <branch-name>
+	commit, err := db.gitRepo.CommitObject(ref.Hash())
+	if err != nil {
+		err = fmt.Errorf("list command: retrieving the commit object of branch %s error: %w", branchName, err)
+		return
+	}
+
+	tree, err := commit.Tree()
+	if err != nil {
+		err = fmt.Errorf("list command: retrieve the tree from the commit %s (%s) error: %w", commit.ID(), branchName, err)
+		return
+	}
+
+	paths := make([]string, 0)
+	kvIters := make([]*kvIter, 0)
+	err = tree.Files().ForEach(func(file *object.File) error {
+		// when filter applied
+		if path.Clean(cfg.prefix) != "" && path.Dir(file.Name) == cfg.prefix {
+			paths = append(paths, file.Name)
+			kvIters = append(kvIters, &kvIter{
+				k: file.Name,
+				v: file.Reader,
+			})
+			return nil
+		}
+
+		paths = append(paths, file.Name)
+		kvIters = append(kvIters, &kvIter{
+			k: file.Name,
+			v: file.Reader,
+		})
+		return nil
+	})
+	if err != nil {
+		err = fmt.Errorf("list command: cannot iterate tree: %w", err)
+		return
+	}
+
+	worktree, err := db.gitRepo.Worktree()
+	if err != nil {
+		err = fmt.Errorf("list command: cannot get worktree: %w", err)
+		return
+	}
+
+	fs := worktree.Filesystem
+
+	commitNodeIndex := getCommitNodeIndex(db.gitRepo, fs)
+	commitNode, err := commitNodeIndex.Get(ref.Hash())
+	if err != nil {
+		err = fmt.Errorf("list command: cannot get commit node index: %w", err)
+		return
+	}
+
+	revs, err := getLastCommitForPaths(commitNode, paths)
+	if err != nil {
+		err = fmt.Errorf("list command: cannot get last commit for paths: %w", err)
+		return
+	}
+
+	// build output using interface implementation
+	entryRow := make([]KV, 0)
+	for _, kv := range kvIters {
+		kv.lastCommit = commit // use current commit as default
+
+		lastCommit, exist := revs[kv.Key()]
+		if exist && lastCommit != nil {
+			kv.lastCommit = lastCommit
+		}
+
+		entryRow = append(entryRow, kv)
+	}
+
+	entries = &entriesImpl{
+		kvs: entryRow,
+	}
 	return
 }

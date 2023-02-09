@@ -3,6 +3,7 @@ package gitrows_test
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"github.com/caarlos0/env"
 	"github.com/joho/godotenv"
 	"github.com/stretchr/testify/assert"
@@ -41,6 +42,14 @@ func TestIntegration(t *testing.T) {
 
 	ctx := context.TODO()
 	path := "note.md"
+
+	entries, err := db.List(ctx)
+	assert.NotEmpty(t, entries)
+	assert.NoError(t, err)
+
+	for _, entry := range entries.KVs() {
+		fmt.Printf("%s %s\n", entry.Key(), entry.LastCommit())
+	}
 
 	hash, changed, err := db.Upsert(ctx, path, []byte("rewrite all"),
 		gitrows.UpsertCommitMsg("my update"),
